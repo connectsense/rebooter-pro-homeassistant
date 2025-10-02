@@ -13,7 +13,7 @@
 
 **To enable logging in Home Assistant for the Rebooter Pro integration, do the following:**
 * Click File editor in the sidebar. Use the folder icon to browse the file system.
-* Under the base directory edit the "configuration.yaml file
+* Under the base directory edit the "configuration.yaml" file
 * Add the following:
 
 ```
@@ -29,9 +29,9 @@ logs:
 
 ## Testing
 **As soon a Rebooter Pro is added to your network it should appear as follows** 
-* In your overview page as a device named Rebooter Pro <serial number>. There will be a reboot button and an outlet toggle button in it's device box.
-* Under Settings → Devices & Services → Devices, as a device named Rebooter Pro <serial number>
-* Under Settings → Devices & Services → Integrations → Rebooter Pro, it wil show up as an Integration entry named Rebooter Pro <serial number>
+* In your overview page as a device named Rebooter Pro 10XXXXX. There will be a reboot button and an outlet toggle button in it's device box.
+* Under Settings → Devices & Services → Devices, as a device named Rebooter Pro 10XXXXX
+* Under Settings → Devices & Services → Integrations → Rebooter Pro, it wil show up as an Integration entry named Rebooter Pro 10XXXXX
  
 **You can manually set up a Rebooter Pro (should automatically work) by doing the following**
 * Under Settings → Devices & Services → Integrations, click "Add integration".
