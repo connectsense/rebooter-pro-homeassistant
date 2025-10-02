@@ -1,0 +1,30 @@
+send_test_notification:
+  name: Send test notification
+  description: Send a test push using the integration's selected notify service (defaults to notify.notify).
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Target Rebooter Pro config entry ID. If omitted and only one device exists, that one is used.
+      selector:
+        text:
+    title:
+      name: Title
+      description: Notification title.
+      example: Rebooter Pro Test
+      selector:
+        text:
+    message:
+      name: Message
+      description: Notification body. If omitted, a default message is generated.
+      example: This is a test notification from Rebooter Pro.
+      selector:
+        text:
+    code:
+      name: Code
+      description: Optional device code to auto-generate a default message (1=OFF, 2=ON, 3=REBOOTING).
+      selector:
+        number:
+          min: 1
+          max: 3
+          mode: box
+
