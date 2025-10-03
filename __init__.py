@@ -3,6 +3,7 @@ from __future__ import annotations
 from aiohttp import web
 
 import logging
+import re
 from urllib.parse import urlparse
 from typing import Any
 
@@ -44,19 +45,16 @@ _LOGGER = logging.getLogger(__name__)
 
 # ---------- Helpers ----------
 
-def _device_matches_entry(entry: ConfigEntry, device_field: str | None) -> bool:
-    """Return True if the incoming 'device' belongs to this entry.
-
-    Device field is like 'CS-RBTR-1000001'.
-    - If entry.unique_id is the serial digits (e.g., '1000001'), match by suffix.
-    - If unique_id is not numeric (e.g., manual host), accept all (cannot disambiguate).
-    """
-    if not device_field:
-        return True
-    uid = entry.unique_id or ""
+def _serial_from_entry_and_data(entry: ConfigEntry, data: dict[str, Any]) -> str:
+    """Prefer the config-entry unique_id (digits), else parse trailing digits from payload 'device'."""
+    uid = (entry.unique_id or "").strip()
     if uid.isdigit():
-        return device_field.endswith(uid)
-    return True
+        return uid
+    dev = (data.get("device") or "").strip()
+    m = re.search(r"(\d+)$", dev)
+    if m:
+        return m.group(1)
+    return uid or dev  # last-resort fallback
 
 
 def _normalize_payload(raw: dict[str, Any]) -> dict[str, Any]:
@@ -172,10 +170,13 @@ async def _register_webhook(hass: HomeAssistant, entry: ConfigEntry) -> tuple[st
                         CODE_ON: "turned ON",
                         CODE_REBOOTING: "is REBOOTING",
                     }.get(code, "changed")
+                    serial = _serial_from_entry_and_data(entry, data)
+                    device_name = f"Rebooter Pro {serial}" if serial else (entry.title or "Rebooter Pro")
                     notify_payload = {
-                        "title": f"{data.get('device')} {code_text}",
-                        "message": f"{data.get('device')} {data.get('message', '')} via {via_str}",
+                        "title": f"Rebooter Pro {code_text}",
+                        "message": f"{device_name} {data.get('message', '')} via {via_str}",
                     }
+
                     try:
                         await hass.services.async_call(domain, service, notify_payload, blocking=False)
                     except Exception:
