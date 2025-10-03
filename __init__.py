@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from aiohttp import web
+
 import logging
 from urllib.parse import urlparse
 from typing import Any
@@ -100,79 +102,123 @@ async def _register_webhook(hass: HomeAssistant, entry: ConfigEntry) -> tuple[st
         wh_id = webhook.async_generate_id()
         hass.config_entries.async_update_entry(entry, data={**entry.data, "webhook_id": wh_id})
 
-    async def handle_webhook(hass: HomeAssistant, webhook_id: str, request):
-        """Receive device notifications, normalize, emit HA event, send optional push, and update entities."""
+    async def handle_webhook(hass, webhook_id, request):
+        # Parse JSON safely
         try:
-            raw = await request.json()
-        except Exception:
-            return webhook.WebhookResponse(status=400, body="Invalid JSON")
+            data = await request.json()
+        except Exception as e:
+            _LOGGER.debug("Webhook %s: invalid JSON (%s)", webhook_id, e)
+            return web.Response(status=400, text="Invalid JSON")
 
-        # Expected raw payload:
-        # { "device": "CS-RBTR-<serial>", "code": 1|2|3, "source": "...", "message": "..." }
+        # Map webhook_id -> config entry (with fallback scan)
+        domain_store = hass.data.setdefault(DOMAIN, {})
+        entry_id = domain_store.get("webhook_to_entry", {}).get(webhook_id)
 
-        device_field = (raw or {}).get("device")
-        if not _device_matches_entry(entry, device_field):
-            _LOGGER.debug(
-                "Ignoring webhook for device=%s not matching entry unique_id=%s",
-                device_field,
-                entry.unique_id,
-            )
-            return webhook.WebhookResponse(status=200)
+        if not entry_id:
+            # Fallback: find which entry store advertises this webhook_id
+            for eid, s in domain_store.items():
+                if isinstance(s, dict) and s.get("webhook_id") == webhook_id:
+                    entry_id = eid
+                    domain_store.setdefault("webhook_to_entry", {})[webhook_id] = eid
+                    break
 
-        # Normalize for entities
-        payload = _normalize_payload(raw)
-        _LOGGER.debug("Webhook payload normalized: %s", payload)
+        if not entry_id:
+            return web.Response(status=404, text="Unknown webhook")
 
-        # ---- Fire HA event for custom automations (public API) ----
-        code_int = int(raw.get("code", 0) or 0)
-        hass.bus.async_fire(
-            f"{DOMAIN}_event",
-            {
-                "device": raw.get("device"),
-                "code": code_int,
-                "source": raw.get("source"),
-                "message": raw.get("message"),
-                "entry_id": entry.entry_id,
-                "unique_id": entry.unique_id,
-            },
-        )
+        # Normalize payload based on code 1/2/3
+        code = data.get("code")
+        try:
+            code = int(code) if code is not None else None
+        except (TypeError, ValueError):
+            code = None
 
-        # ---- Optional built-in push notifications ----
-        opts = entry.options or {}
-        notify_enabled = opts.get(CONF_NOTIFY_ENABLED, True)  # default ON
-        if notify_enabled:
-            notify_service_str = opts.get(CONF_NOTIFY_SERVICE, "notify.notify")
-            # Which codes to send?
-            should = (
-                (code_int == CODE_OFF and opts.get(CONF_NOTIFY_CODE_OFF, True)) or
-                (code_int == CODE_ON and opts.get(CONF_NOTIFY_CODE_ON, True)) or
-                (code_int == CODE_REBOOTING and opts.get(CONF_NOTIFY_CODE_REBOOT, True))
-            )
-            if should and notify_service_str:
-                domain, service = _service_from_string(notify_service_str)
-                # Human text for code
-                code_text = {CODE_OFF: "turned OFF", CODE_ON: "turned ON", CODE_REBOOTING: "is REBOOTING"}.get(code_int, "changed")
-                data = {
-                    "title": f"{raw.get('device')} ({raw.get('source','n/a')})",
-                    "message": f"{raw.get('device')} {code_text} — {raw.get('message','')}",
-                }
-                try:
-                    await hass.services.async_call(domain, service, data, blocking=False)
-                except Exception:  # pragma: no cover
-                    _LOGGER.exception("Failed to call %s.%s for notification", domain, service)
 
-        # Merge into per-entry state cache
-        store = hass.data[DOMAIN][entry.entry_id]
-        store["state"].update(payload)
+        # Check if we are inside the mute window for this entry
+        domain_store = hass.data.setdefault(DOMAIN, {})
+        entry_store = domain_store.get(entry_id, {})
+        mute_until = entry_store.get("mute_until")
 
-        # Notify entities bound to this entry
-        async_dispatcher_send(hass, f"{SIGNAL_UPDATE}_{entry.entry_id}", payload)
+        mute_active = False
+        if mute_until is not None:
+            try:
+                # dt_util.utcnow() is timezone-aware; stored value is too
+                mute_active = dt_util.utcnow() < mute_until
+            except Exception:
+                mute_active = False
 
-        return webhook.WebhookResponse(status=200)
+
+        # Choose the attribution for notifications:
+        # - If we're inside the mute window and we have a last_actor (HA user), and the source was "App", use last actor.
+        # - Otherwise, fall back to the device-provided "source".
+        actor = entry_store.get("last_actor")
+        via_str = f"Home Assistant — {actor}" if (mute_active and actor and (data.get("source") or "n/a")=="App") else (data.get("source", "n/a"))
+        
+        # ---- Optional built-in push notifications (respects user options)
+        entry = hass.config_entries.async_get_entry(entry_id)
+        if entry is not None:
+            opts = entry.options or {}
+            notify_enabled = opts.get(CONF_NOTIFY_ENABLED, True)  # default ON
+            if notify_enabled and code in (CODE_OFF, CODE_ON, CODE_REBOOTING):
+                should = (
+                    (code == CODE_OFF and opts.get(CONF_NOTIFY_CODE_OFF, True)) or
+                    (code == CODE_ON and opts.get(CONF_NOTIFY_CODE_ON, True)) or
+                    (code == CODE_REBOOTING and opts.get(CONF_NOTIFY_CODE_REBOOT, True))
+                )
+                if should:
+                    notify_service_str = opts.get(CONF_NOTIFY_SERVICE, "notify.notify")
+                    domain, service = _service_from_string(notify_service_str)
+                    code_text = {
+                        CODE_OFF: "turned OFF",
+                        CODE_ON: "turned ON",
+                        CODE_REBOOTING: "is REBOOTING",
+                    }.get(code, "changed")
+                    notify_payload = {
+                        "title": f"{data.get('device')} {code_text}",
+                        "message": f"{data.get('device')} {data.get('message', '')} via {via_str}",
+                    }
+                    try:
+                        await hass.services.async_call(domain, service, notify_payload, blocking=False)
+                    except Exception:
+                        _LOGGER.exception("Failed to call %s.%s for notification", domain, service)
+
+        payload: dict[str, Any] = {}
+
+        # Pure mute: ignore code 1/2 state flips during the window
+        if not (mute_active and code in (CODE_OFF, CODE_ON) and (data.get("source") or "n/a") == "App"):
+            if code == CODE_OFF:
+                payload["outlet_active"] = False
+                payload["rebooting"] = False
+            elif code == CODE_ON:
+                payload["outlet_active"] = True
+                payload["rebooting"] = False
+        
+
+        if code == CODE_REBOOTING:
+            payload["rebooting"] = True  # leave outlet_active unchanged
+
+        # Always pass through last_event for attributes
+        payload["last_event"] = {
+            "device": data.get("device"),
+            "code": code,
+            "source": data.get("source"),
+            "message": data.get("message"),
+            "timestamp": data.get("timestamp") or dt_util.utcnow().isoformat(),
+        }
+
+        # Dispatch on the event loop (thread-safe)
+        async_dispatcher_send(hass, f"{SIGNAL_UPDATE}_{entry_id}", payload)
+
+        return web.Response(status=200, text="OK")
 
     # Register handler (idempotent by id)
     webhook.async_register(hass, DOMAIN, "Rebooter Pro", wh_id, handle_webhook)
     wh_url = webhook.async_generate_url(hass, wh_id)
+    
+    domain_store = hass.data.setdefault(DOMAIN, {})
+    entry_store = domain_store.setdefault(entry.entry_id, {})
+    entry_store["webhook_id"] = wh_id
+    domain_store.setdefault("webhook_to_entry", {})[wh_id] = entry.entry_id
+    
     _LOGGER.debug("Webhook registered: id=%s url=%s", wh_id, wh_url)
     return wh_id, wh_url
 
@@ -310,5 +356,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         wh_id = entry.data.get("webhook_id")
         if wh_id:
             webhook.async_unregister(hass, wh_id)
+            hass.data.get(DOMAIN, {}).get("webhook_to_entry", {}).pop(wh_id, None)
         hass.data[DOMAIN].pop(entry.entry_id, None)
     return unload_ok
