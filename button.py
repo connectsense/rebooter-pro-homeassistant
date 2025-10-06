@@ -9,7 +9,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.components.button import ButtonEntity
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.const import CONF_HOST, CONF_PORT
+from homeassistant.const import CONF_HOST
 from homeassistant.exceptions import HomeAssistantError
 
 _LOGGER = logging.getLogger(__name__)
@@ -95,8 +95,7 @@ class RebooterRebootButton(ButtonEntity):
 
     async def async_press(self) -> None:
         host = self.entry.data[CONF_HOST]
-        port = self.entry.data.get(CONF_PORT, 443)
-        base = f"https://{host}:{port}"
+        base = f"https://{host}:443"
 
         session = async_get_clientsession(self.hass)
         ssl_ctx = await get_aiohttp_ssl(self.hass, self.entry)

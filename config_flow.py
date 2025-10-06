@@ -7,7 +7,7 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.const import CONF_HOST, CONF_PORT, CONF_VERIFY_SSL
+from homeassistant.const import CONF_HOST
 
 from .const import DOMAIN
 
@@ -15,10 +15,9 @@ _LOGGER = logging.getLogger(__name__)
 
 SERIAL_RE = re.compile(r"Rebooter Pro\s+(\d+)", re.IGNORECASE)
 
+# Only hostname is requested now
 USER_SCHEMA = vol.Schema({
     vol.Required(CONF_HOST, default="rebooter-pro.local"): str,
-    vol.Optional(CONF_PORT, default=443): int,
-    vol.Optional(CONF_VERIFY_SSL, default=True): bool,
 })
 
 
@@ -42,30 +41,32 @@ class RebooterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_show_form(step_id="user", data_schema=USER_SCHEMA)
 
         host = (user_input.get(CONF_HOST) or "").strip()
-        port = int(user_input.get(CONF_PORT, 443))
-        verify = bool(user_input.get(CONF_VERIFY_SSL, True))
 
-        # If the user typed an IP, force verification OFF to avoid TLS hostname mismatch.
+        # If the user typed an IP, note (for logs) that TLS hostname verification should be skipped.
+        # The integration should actually enforce/decide this in ssl_utils based on host being an IP.
         try:
             ipaddress.ip_address(host)
-            if verify:
-                _LOGGER.debug("User entered IP '%s'; forcing verify_ssl=False to avoid hostname mismatch.", host)
-            verify = False
+            _LOGGER.debug(
+                "User entered IP '%s'; downstream SSL helper should disable hostname verification.",
+                host,
+            )
         except ValueError:
-            # Not an IP -> keep user's verify setting (expecting a hostname)
+            # Not an IP; keep normal hostname verification downstream.
             pass
 
         await self.async_set_unique_id(host)
-        self._abort_if_unique_id_configured(updates={CONF_HOST: host, CONF_PORT: port, CONF_VERIFY_SSL: verify})
+        self._abort_if_unique_id_configured(updates={CONF_HOST: host})
 
-        data = {CONF_HOST: host, CONF_PORT: port, CONF_VERIFY_SSL: verify}
+        data = {
+            CONF_HOST: host,
+            "ip_addresses": [],  # empty for manual setup
+        }
         return self.async_create_entry(title=f"Rebooter Pro ({host})", data=data)
 
     async def async_step_zeroconf(self, discovery_info: Any):
         # Handle both ZeroconfServiceInfo and dict payloads
         hostname_raw = _zget(discovery_info, "hostname") or ""
         hostname = hostname_raw.rstrip(".") if hostname_raw else ""
-        port = int(_zget(discovery_info, "port") or 443)
 
         # ip_addresses is a list in modern HA; older payloads may have ip_address (singular)
         ips = _zget(discovery_info, "ip_addresses") or []
@@ -76,25 +77,36 @@ class RebooterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         host_attr = _zget(discovery_info, "host")  # may be None or an IP string
 
-        # Choose host + verification: hostname => verify ON, else fallback to IP => verify OFF
+        # Choose host used by the integration:
+        # Prefer mDNS hostname (enables TLS hostname verification downstream).
+        # Otherwise, fall back to an IP (SSL helper should skip verification in that case).
         if hostname:
             host = hostname
-            verify = True
         else:
             host = host_attr or (ips[0] if ips else None)
-            verify = False
-            _LOGGER.debug("Zeroconf fallback to IP '%s'; setting verify_ssl=False.", host)
+            _LOGGER.debug(
+                "Zeroconf fallback to IP '%s'; downstream SSL helper should disable hostname verification.",
+                host,
+            )
 
         name = _zget(discovery_info, "name") or ""  # e.g. "Rebooter Pro 1010001._https._tcp.local."
         m = SERIAL_RE.search(name)
         serial = m.group(1) if m else (hostname or host or "rebooter-pro")
 
         await self.async_set_unique_id(str(serial))
-        self._abort_if_unique_id_configured(updates={CONF_HOST: host, CONF_PORT: port, CONF_VERIFY_SSL: verify})
+        self._abort_if_unique_id_configured(
+            updates={
+                CONF_HOST: host,
+                "ip_addresses": [str(ip) for ip in ips],
+            }
+        )
 
         return self.async_create_entry(
             title=f"Rebooter Pro {serial}",
-            data={CONF_HOST: host, CONF_PORT: port, CONF_VERIFY_SSL: verify},
+            data={
+                CONF_HOST: host,
+                "ip_addresses": [str(ip) for ip in ips],
+            },
         )
 
     @staticmethod

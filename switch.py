@@ -15,7 +15,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.const import CONF_HOST, CONF_PORT
+from homeassistant.const import CONF_HOST
 
 from .const import DOMAIN, SIGNAL_UPDATE
 from .ssl_utils import get_aiohttp_ssl
@@ -115,8 +115,7 @@ class RebooterOutletSwitch(SwitchEntity):
 
     async def _fetch_initial_state(self):
         host = self.entry.data[CONF_HOST]
-        port = self.entry.data.get(CONF_PORT, 443)
-        base = f"https://{host}:{port}"
+        base = f"https://{host}:443"
 
         ssl_ctx = await get_aiohttp_ssl(self.hass, self.entry)
         session = async_get_clientsession(self.hass)
@@ -156,8 +155,7 @@ class RebooterOutletSwitch(SwitchEntity):
 
     async def _post_control(self, body: dict):
         host = self.entry.data[CONF_HOST]
-        port = self.entry.data.get(CONF_PORT, 443)
-        base = f"https://{host}:{port}"
+        base = f"https://{host}:443"
 
         ssl_ctx = await get_aiohttp_ssl(self.hass, self.entry)
         session = async_get_clientsession(self.hass)
