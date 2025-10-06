@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 DOMAIN = "rebooter_pro"
 
 # Dispatcher signal base; we suffix with entry_id so multiple devices don't cross-talk
@@ -21,5 +23,6 @@ CONF_WEBHOOK_TOKEN_PREV = "webhook_token_prev"
 CONF_WEBHOOK_TOKEN_PREV_VALID_UNTIL = "webhook_token_prev_valid_until"
 DEFAULT_TOKEN_GRACE_SECONDS = 120  # accept previous token for 2 minutes after rotation
 
-# Rotation interval (try to rotate the auth token every 24 hours)
-ROTATE_MINUTES = 60 * 24
+# Token rotation cadence
+ROTATE_INTERVAL = timedelta(days=1)       # daily rotation
+RETRY_INTERVAL = timedelta(minutes=5)     # after-webhook retry cadence

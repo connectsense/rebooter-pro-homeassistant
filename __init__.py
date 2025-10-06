@@ -25,6 +25,8 @@ from homeassistant.util import dt as dt_util
 from .const import (
     DOMAIN,
     SIGNAL_UPDATE,
+    ROTATE_INTERVAL,
+    RETRY_INTERVAL,
     # user notifications opts
     CONF_NOTIFY_ENABLED,
     CONF_NOTIFY_SERVICE,
@@ -39,7 +41,6 @@ from .const import (
     CONF_WEBHOOK_TOKEN_PREV,
     CONF_WEBHOOK_TOKEN_PREV_VALID_UNTIL,
     DEFAULT_TOKEN_GRACE_SECONDS,
-    ROTATE_MINUTES,
 )
 
 # Add more platforms as you implement them (sensor/update/etc.)
@@ -82,33 +83,6 @@ def _serial_from_entry_and_data(entry: ConfigEntry, data: dict[str, Any]) -> str
     if m:
         return m.group(1)
     return uid or dev  # last-resort fallback
-
-
-def _normalize_payload(raw: dict[str, Any]) -> dict[str, Any]:
-    """Map the device JSON into flat keys our entities use."""
-    code = int(raw.get("code", 0) or 0)
-    updates: dict[str, Any] = {}
-
-    if code == CODE_OFF:
-        updates["outlet_active"] = False
-        updates["rebooting"] = False
-    elif code == CODE_ON:
-        updates["outlet_active"] = True
-        updates["rebooting"] = False
-    elif code == CODE_REBOOTING:
-        # Leave outlet_active unchanged; mark rebooting flag for UI.
-        updates["rebooting"] = True
-
-    # Always attach last_event for visibility/automations
-    updates["last_event"] = {
-        "device": raw.get("device"),
-        "code": code,
-        "source": raw.get("source"),
-        "message": raw.get("message"),
-        "timestamp": dt_util.utcnow().isoformat(),
-    }
-    return updates
-
 
 def _service_from_string(s: str) -> tuple[str, str]:
     """Split a service string like 'notify.notify' into ('notify', 'notify')."""
@@ -269,6 +243,12 @@ async def _register_webhook(hass: HomeAssistant, entry: ConfigEntry) -> tuple[st
         # Dispatch on the event loop (thread-safe)
         async_dispatcher_send(hass, f"{SIGNAL_UPDATE}_{entry_id}", payload)
 
+        # Start a token-rotation retry loop (every 5 minutes) after any valid webhook
+        try:
+            await _ensure_post_webhook_retry(hass, entry_id)
+        except Exception as exc:
+            _LOGGER.debug("Post-webhook retry setup failed: %s", exc)
+
         return web.Response(status=200, text="OK")
 
     # Register handler (idempotent): if already registered, reuse it
@@ -288,8 +268,9 @@ async def _register_webhook(hass: HomeAssistant, entry: ConfigEntry) -> tuple[st
     _LOGGER.debug("Webhook registered: id=%s url=%s", wh_id, wh_url)
     return wh_id, wh_url
 
-async def _rotate_token_and_push(hass: HomeAssistant, entry: ConfigEntry, wh_url: str, reason: str) -> None:
-    """Rotate the per-entry token and push it to the device. On failure, do not change stored tokens."""
+async def _rotate_token_and_push(hass: HomeAssistant, entry: ConfigEntry, wh_url: str, reason: str) -> bool:
+    """Rotate the per-entry token and push it to the device.
+    Returns True on success (tokens updated), False on failure (unchanged)."""
     now = dt_util.utcnow()
     grace_seconds = DEFAULT_TOKEN_GRACE_SECONDS
 
@@ -304,7 +285,7 @@ async def _rotate_token_and_push(hass: HomeAssistant, entry: ConfigEntry, wh_url
         await _push_webhook_to_device(hass, entry, wh_url, override_token=new_tok)
     except Exception as exc:
         _LOGGER.info("Token rotation skipped (push failed): %s", exc)
-        return
+        return False
 
     # Persist rotation: current -> previous (with grace), new -> current
     prev_valid_until_iso = (now + timedelta(seconds=grace_seconds)).isoformat()
@@ -318,7 +299,53 @@ async def _rotate_token_and_push(hass: HomeAssistant, entry: ConfigEntry, wh_url
         },
     )
     _LOGGER.debug("Rotated webhook token for %s (reason=%s); previous valid until %s", entry.entry_id, reason, prev_valid_until_iso)
-    
+    return True
+
+def _get_entry_store(hass: HomeAssistant, entry_id: str) -> dict:
+    """Convenience accessor for per-entry store."""
+    return hass.data.setdefault(DOMAIN, {}).setdefault(entry_id, {})
+
+
+def _cancel_retry(hass: HomeAssistant, entry_id: str) -> None:
+    """Cancel an active post-webhook retry loop if present."""
+    store = _get_entry_store(hass, entry_id)
+    unsub = store.pop("rotate_retry_unsub", None)
+    if unsub:
+        try:
+            unsub()
+        except Exception:
+            pass
+        _LOGGER.debug("Stopped post-webhook rotation retry for %s", entry_id)
+
+
+async def _ensure_post_webhook_retry(hass: HomeAssistant, entry_id: str) -> None:
+    """Start a 5-minute retry loop to rotate the token after a webhook, until success."""
+    store = _get_entry_store(hass, entry_id)
+    if store.get("rotate_retry_unsub"):
+        # Already running
+        return
+
+    async def _retry_tick(_now) -> None:
+        entry = hass.config_entries.async_get_entry(entry_id)
+        if not entry:
+            _cancel_retry(hass, entry_id)
+            return
+        wh_id = store.get("webhook_id")
+        if not wh_id:
+            _cancel_retry(hass, entry_id)
+            return
+        wh_url = webhook.async_generate_url(hass, wh_id)
+        ok = await _rotate_token_and_push(hass, entry, wh_url, reason="post-webhook")
+        if ok:
+            _cancel_retry(hass, entry_id)
+
+    # Schedule retry loop
+    unsub = async_track_time_interval(hass, _retry_tick, RETRY_INTERVAL)
+    store["rotate_retry_unsub"] = unsub
+    _LOGGER.debug("Started post-webhook rotation retry every %s for %s", RETRY_INTERVAL, entry_id)
+    # Kick an immediate attempt (doesn't block the loop)
+    hass.async_create_task(_retry_tick(dt_util.utcnow()))
+
 async def _push_webhook_to_device(hass: HomeAssistant, entry: ConfigEntry, wh_url: str, override_token: str | None = None) -> None:
     """POST the HA webhook to the device using the device's JSON shape.
 
@@ -357,13 +384,7 @@ async def _push_webhook_to_device(hass: HomeAssistant, entry: ConfigEntry, wh_ur
 
 
 async def _options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Re-register webhook with device when options change."""
-    try:
-        _, wh_url = await _register_webhook(hass, entry)
-        await _push_webhook_to_device(hass, entry, wh_url)
-        _LOGGER.info("Re-registered webhook with device at %s", entry.data.get(CONF_HOST))
-    except Exception as exc:
-        _LOGGER.warning("Failed to re-register webhook with device: %s", exc)
+    _LOGGER.debug("Options updated for %s", entry.entry_id)
 
 
 # ---------- HA entry points ----------
@@ -392,12 +413,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Re-register with device whenever options change
     entry.async_on_unload(entry.add_update_listener(_options_updated))
 
-    # --- Periodic token rotation every ROTATIE_MINUTES minutes ---
+    # --- Periodic token rotation every ROTATE_INTERVAL ---
     async def _tick(_now):
         # Rotate token and push to device on the event loop
-        await _rotate_token_and_push(hass, entry, wh_url, reason="periodic")
+        store = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+        wh_id = store.get("webhook_id") or entry.data.get("webhook_id")
+        if not wh_id:
+            return
+        fresh_wh_url = webhook.async_generate_url(hass, wh_id)
+        await _rotate_token_and_push(hass, entry, fresh_wh_url, reason="daily")
 
-    unsub_rotate = async_track_time_interval(hass, _tick, timedelta(minutes=ROTATE_MINUTES))
+    unsub_rotate = async_track_time_interval(hass, _tick, ROTATE_INTERVAL)
     entry.async_on_unload(unsub_rotate)
 
     # ---- Domain service: send_test_notification (register once) ----

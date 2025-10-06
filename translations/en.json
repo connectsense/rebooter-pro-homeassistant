@@ -5,9 +5,7 @@
         "title": "Add Rebooter Pro",
         "description": "Enter the host (e.g., rebooter-pro.local) and options.",
         "data": {
-          "host": "Host or mDNS name",
-          "port": "Port",
-          "verify_ssl": "Verify SSL certificate"
+          "host": "Host or mDNS name"
         }
       }
     }
@@ -16,10 +14,8 @@
     "step": {
       "init": {
         "title": "Rebooter Pro Options",
-        "description": "Webhook registration (device) + user push notifications.",
+        "description": "Built-in push notifications from the integration.",
         "data": {
-          "notify_port": "Notify port (blank to auto-derive from webhook URL)",
-          "notify_cert_pem": "Notify certificate (PEM sent to device; blank if HA uses public CA)",
           "notify_enabled": "Send push notifications from the integration",
           "notify_service": "Notify service (default: notify.notify)",
           "notify_on_off": "Notify when outlet turns OFF (code 1)",
