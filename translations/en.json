@@ -1,29 +1,59 @@
 {
+  "title": "Rebooter Pro",
   "config": {
     "step": {
       "user": {
         "title": "Add Rebooter Pro",
-        "description": "Enter the host (e.g., rebooter-pro.local) and options.",
+        "description": "Enter the device hostname (e.g., `rebooter-pro.local`) or IP address.",
         "data": {
-          "host": "Host or mDNS name"
+          "host": "Host or IP"
         }
       }
+    },
+    "abort": {
+      "already_configured": "This Rebooter Pro is already configured."
+    },
+    "error": {
+      "cannot_connect": "Failed to connect. Check the host and try again.",
+      "unknown": "Unexpected error."
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "Rebooter Pro Options",
-        "description": "Built-in push notifications from the integration.",
+        "description": "Configure automatic reboot behavior and optional push notifications.",
         "data": {
-          "notify_enabled": "Send push notifications from the integration",
-          "notify_service": "Notify service (default: notify.notify)",
-          "notify_on_off": "Notify when outlet turns OFF (code 1)",
-          "notify_on_on": "Notify when outlet turns ON (code 2)",
-          "notify_on_reboot": "Notify when device is REBOOTING (code 3)"
+          "ar_off_duration_seconds": "Off Duration (seconds)",
+          "ar_power_fail": "Enable Power Failure Detection",
+          "ar_ping_fail": "Enable Ping Fail Detection",
+          "ar_trigger_minutes": "Outage Detection Trigger Time (minutes)",
+          "ar_post_reboot_delay_minutes": "After Reboot Detection Delay (minutes)",
+          "ar_any_fail": "Any Fail Logic",
+          "ar_max_reboots": "Max Reboots Per Outage",
+          "ar_target_1": "Ping Target 1 (URL or IP)",
+          "ar_target_2": "Ping Target 2 (URL or IP)",
+          "ar_target_3": "Ping Target 3 (URL or IP)",
+          "ar_target_4": "Ping Target 4 (URL or IP)",
+          "ar_target_5": "Ping Target 5 (URL or IP)",
+          "notify_enabled": "Send push notifications",
+          "notify_service": "Notify service",
+          "notify_on_off": "Notify when outlet turns OFF",
+          "notify_on_on": "Notify when outlet turns ON",
+          "notify_on_reboot": "Notify when device is REBOOTING"
+        },
+        "data_description": {
+          "ar_off_duration_seconds": "Time the relay stays OFF during any reboot (10–65535).",
+          "ar_power_fail": "If enabled, the device will reboot connected equipment after power is restored.",
+          "ar_ping_fail": "If enabled, the device will reboot on network outage based on the trigger time.",
+          "ar_trigger_minutes": "Must be continuously offline for this long before rebooting (2–10).",
+          "ar_post_reboot_delay_minutes": "Delay before ping checks resume after power returns (0–10).",
+          "ar_any_fail": "Enabled: reboot when any target fails. Disabled: all targets must fail.",
+          "ar_max_reboots": "If pings never recover, reboot at most this many times.",
+          "notify_enabled": "Home Assistant will send a notification when state changes.",
+          "notify_service": "Example: `notify.notify` or `notify.mobile_app_my_phone`."
         }
       }
     }
   }
 }
-

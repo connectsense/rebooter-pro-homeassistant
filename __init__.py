@@ -4,11 +4,16 @@ from aiohttp import web
 
 import logging
 import re
+import aiohttp
+import asyncio
+import re
+import ipaddress
 from urllib.parse import urlparse
 from typing import Any
 
 import voluptuous as vol
 
+import ssl
 from .ssl_utils import get_aiohttp_ssl
 
 import secrets
@@ -41,13 +46,110 @@ from .const import (
     CONF_WEBHOOK_TOKEN_PREV,
     CONF_WEBHOOK_TOKEN_PREV_VALID_UNTIL,
     DEFAULT_TOKEN_GRACE_SECONDS,
+    CONF_AR_POWER_FAIL,
+    CONF_AR_PING_FAIL,
+    CONF_AR_TRIGGER_MIN,
+    CONF_AR_DELAY_MIN,
+    CONF_AR_ANY_FAIL,
+    CONF_AR_MAX_REBOOTS,
+    CONF_AR_OFF_SECONDS,
+    CONF_AR_TARGET_1, 
+    CONF_AR_TARGET_2, 
+    CONF_AR_TARGET_3, 
+    CONF_AR_TARGET_4, 
+    CONF_AR_TARGET_5,
+    DEFAULT_AR_POWER_FAIL,
+    DEFAULT_AR_PING_FAIL,
+    DEFAULT_AR_TRIGGER_MIN,
+    DEFAULT_AR_DELAY_MIN,
+    DEFAULT_AR_ANY_FAIL,
+    DEFAULT_AR_MAX_REBOOTS,
+    DEFAULT_AR_OFF_SECONDS,
+    
 )
+
+# case-insensitive, strips only a leading scheme
+_SCHEME_RE = re.compile(r"^\s*https?://", re.IGNORECASE)
 
 # Add more platforms as you implement them (sensor/update/etc.)
 PLATFORMS = ["switch", "button"]
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _collect_targets_from_options(opts: dict[str, Any]) -> list[str]:
+    slots = [opts.get(CONF_AR_TARGET_1), opts.get(CONF_AR_TARGET_2),
+             opts.get(CONF_AR_TARGET_3), opts.get(CONF_AR_TARGET_4),
+             opts.get(CONF_AR_TARGET_5)]
+    targets = []
+    seen = set()
+    for v in slots:
+        s = (v or "").strip()
+        if not s:
+            continue
+        s = _SCHEME_RE.sub("", s, count=1)
+        if s and s not in seen:
+            targets.append(s)
+            seen.add(s)
+        if len(targets) == 5:
+            break
+    return targets
+
+def _build_device_config_payload(entry: ConfigEntry) -> dict:
+    """Return dict matching device's /config schema."""
+    opts = entry.options or {}
+
+    off_sec = int(opts.get(CONF_AR_OFF_SECONDS, DEFAULT_AR_OFF_SECONDS))
+    off_sec = max(10, min(65535, off_sec))
+
+    power = bool(opts.get(CONF_AR_POWER_FAIL, DEFAULT_AR_POWER_FAIL))
+    ping = bool(opts.get(CONF_AR_PING_FAIL, DEFAULT_AR_PING_FAIL))
+    trig = int(opts.get(CONF_AR_TRIGGER_MIN, DEFAULT_AR_TRIGGER_MIN))
+    trig = max(2, min(10, trig))
+    delay = int(opts.get(CONF_AR_DELAY_MIN, DEFAULT_AR_DELAY_MIN))
+    delay = max(0, min(10, delay))
+    any_fail = bool(opts.get(CONF_AR_ANY_FAIL, DEFAULT_AR_ANY_FAIL))
+    max_reboots = int(opts.get(CONF_AR_MAX_REBOOTS, DEFAULT_AR_MAX_REBOOTS))
+    max_reboots = max(0, min(10, max_reboots))
+
+    targets = _collect_targets_from_options(opts)
+    if targets:
+        targets = targets[:5]
+
+    payload: dict[str, Any] = {
+        "off_duration": off_sec,
+        "max_auto_reboots": max_reboots,
+        "enable_power_fail_reboot": power,
+        "enable_ping_fail_reboot": ping,
+    }
+
+    if ping:
+        ping_cfg = {
+            "any_fail_logic": any_fail,
+            "outage_trigger_time": trig,
+            "detection_delay": delay,
+        }
+        if targets:
+            ping_cfg["target_addrs"] = targets
+        payload["ping_config"] = ping_cfg
+
+    return payload
+
+async def _push_auto_reboot_to_device(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """POST the automatic reboot configuration to https://<host>:443/config."""
+    host = entry.data[CONF_HOST]
+    port = 443
+    base = f"https://{host}:{port}"
+    payload = _build_device_config_payload(entry)
+
+    session = async_get_clientsession(hass)
+    ssl_ctx = await get_aiohttp_ssl(hass, entry)
+
+    _LOGGER.debug("Pushing /config to %s: %s", host, payload)
+    async with session.post(f"{base}/config", json=payload, ssl=ssl_ctx, timeout=10) as r:
+        body = await r.text()
+        _LOGGER.debug("Device /config responded %s: %s", r.status, body[:500])
+        r.raise_for_status()
 
 # ---------- Helpers ----------
 
@@ -384,7 +486,11 @@ async def _push_webhook_to_device(hass: HomeAssistant, entry: ConfigEntry, wh_ur
 
 
 async def _options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    _LOGGER.debug("Options updated for %s", entry.entry_id)
+    try:
+        await _push_auto_reboot_to_device(hass, entry)
+        _LOGGER.info("Re-sent auto-reboot config for %s", entry.data.get(CONF_HOST))
+    except Exception as exc:
+        _LOGGER.warning("Failed to re-register / push config: %s", exc)
 
 
 # ---------- HA entry points ----------
