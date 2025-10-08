@@ -29,6 +29,7 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
 
 class RebooterOutletSwitch(SwitchEntity):
     _attr_name = "Toggle Outlet"
+    _attr_should_poll = False
 
     def __init__(self, hass: HomeAssistant, entry):
         self.hass = hass
