@@ -72,10 +72,33 @@ from .const import (
 _SCHEME_RE = re.compile(r"^\s*https?://", re.IGNORECASE)
 
 # Add more platforms as you implement them (sensor/update/etc.)
-PLATFORMS = ["switch", "button"]
+PLATFORMS = ["switch", "button", "binary_sensor"]
 
 _LOGGER = logging.getLogger(__name__)
 
+
+async def _get_device_config(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any] | None:
+    """GET https://<host>:443/config (return dict or None on error)."""
+    host = entry.data[CONF_HOST]
+    base = f"https://{host}:443"
+    session = async_get_clientsession(hass)
+    ssl_ctx = await get_aiohttp_ssl(hass, entry)
+
+    try:
+        async with session.get(f"{base}/config", ssl=ssl_ctx, timeout=10) as r:
+            text = await r.text()  # capture for diagnostics
+            if r.status != 200:
+                _LOGGER.debug("GET /config %s -> %s; body=%s", host, r.status, text[:500])
+                return None
+            try:
+                data = await r.json(content_type=None)  # parse even if Content-Type is wrong
+            except Exception as e:
+                _LOGGER.debug("GET /config %s JSON decode failed: %r; body=%s", host, e, text[:500])
+                return None
+            return data if isinstance(data, dict) else None
+    except Exception as e:
+        _LOGGER.debug("Exception in _get_device_config: %r", e, exc_info=True)
+        return None
 
 def _collect_targets_from_options(opts: dict[str, Any]) -> list[str]:
     slots = [opts.get(CONF_AR_TARGET_1), opts.get(CONF_AR_TARGET_2),
@@ -488,6 +511,17 @@ async def _push_webhook_to_device(hass: HomeAssistant, entry: ConfigEntry, wh_ur
 async def _options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
     try:
         await _push_auto_reboot_to_device(hass, entry)
+        # Reflect new options in the in-memory state used by the device overview
+        store = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+        state = store.setdefault("state", {})
+        opts = entry.options or {}
+        state["pf_enabled"] = bool(opts.get(CONF_AR_POWER_FAIL, DEFAULT_AR_POWER_FAIL))
+        state["ping_enabled"] = bool(opts.get(CONF_AR_PING_FAIL, DEFAULT_AR_PING_FAIL))
+        async_dispatcher_send(
+            hass,
+            f"{SIGNAL_UPDATE}_{entry.entry_id}",
+            {"pf_enabled": state["pf_enabled"], "ping_enabled": state["ping_enabled"]},
+        )
         _LOGGER.info("Re-sent auto-reboot config for %s", entry.data.get(CONF_HOST))
     except Exception as exc:
         _LOGGER.warning("Failed to re-register / push config: %s", exc)
@@ -498,13 +532,19 @@ async def _options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the Rebooter Pro integration from a config entry."""
     # Per-entry state bucket
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {"state": {}}
+    store = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+    state = store.setdefault("state", {})
 
     # Ensure a current token exists (prev/grace managed elsewhere)
     await _ensure_tokens(hass, entry)
 
     # Cache an IP allowlist for this entry if we discovered any
-    hass.data[DOMAIN][entry.entry_id]["allow_ips"] = _get_allowed_ips_for_entry(hass, entry)
+    store["allow_ips"] = _get_allowed_ips_for_entry(hass, entry)
+
+    # Seed “overview” status flags from options (device overview wants to show these)
+    opts = entry.options or {}
+    state["pf_enabled"] = bool(opts.get(CONF_AR_POWER_FAIL, DEFAULT_AR_POWER_FAIL))
+    state["ping_enabled"] = bool(opts.get(CONF_AR_PING_FAIL, DEFAULT_AR_PING_FAIL))
 
     # Create/register webhook and push it to the device with the current token
     _, wh_url = await _register_webhook(hass, entry)
@@ -512,6 +552,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await _push_webhook_to_device(hass, entry, wh_url)
     except Exception as exc:
         _LOGGER.warning("Could not register webhook with device now: %s", exc)
+
+    #Override with LIVE device state (device wins). Do this in the background.
+    async def _refresh_flags_from_device() -> None:
+        cfg = await _get_device_config(hass, entry)
+        if not isinstance(cfg, dict):
+            return
+        changed = {}
+        if "enable_power_fail_reboot" in cfg:
+            val = bool(cfg["enable_power_fail_reboot"])
+            if state.get("pf_enabled") != val:
+                state["pf_enabled"] = val
+                changed["pf_enabled"] = val
+        if "enable_ping_fail_reboot" in cfg:
+            val = bool(cfg["enable_ping_fail_reboot"])
+            if state.get("ping_enabled") != val:
+                state["ping_enabled"] = val
+                changed["ping_enabled"] = val
+        if changed:
+            async_dispatcher_send(hass, f"{SIGNAL_UPDATE}_{entry.entry_id}", changed)
+
+    hass.async_create_task(_refresh_flags_from_device())
+
 
     # Load platforms (switch, button, etc.)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
