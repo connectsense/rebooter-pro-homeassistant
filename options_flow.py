@@ -80,6 +80,11 @@ MAX_REBOOTS_OPTIONS = [
     SelectOptionDict(label=str(n), value=str(n)) for n in range(1, 10 + 1)
 ] + [SelectOptionDict(label="Unlimited", value="0")]
 
+ANY_FAIL_OPTIONS = [
+    SelectOptionDict(label="Any", value="any"),
+    SelectOptionDict(label="All", value="all"),
+]
+
 def _norm_target(s: str | None) -> str:
     s = (s or "").strip()
     return _SCHEME_RE.sub("", s, count=1) if s else ""
@@ -127,6 +132,10 @@ class RebooterOptionsFlowHandler(config_entries.OptionsFlowWithConfigEntry):
                 secs = DEFAULT_AR_OFF_SECONDS
             secs = max(10, min(65535, secs))
             user_input[CONF_AR_OFF_SECONDS] = secs
+
+            val_any = user_input.get(CONF_AR_ANY_FAIL)
+            if isinstance(val_any, str):
+                user_input[CONF_AR_ANY_FAIL] = (val_any == "any")  # store as bool in options
 
             val = user_input.get(CONF_AR_MAX_REBOOTS)
             if isinstance(val, str) and val.isdigit():
@@ -193,15 +202,14 @@ class RebooterOptionsFlowHandler(config_entries.OptionsFlowWithConfigEntry):
                 TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(CONF_AR_POWER_FAIL, default=opts[CONF_AR_POWER_FAIL]): bool,
             vol.Optional(CONF_AR_PING_FAIL, default=opts[CONF_AR_PING_FAIL]): bool,
-            # Number *boxes* (no slider) for the minute fields:
             vol.Optional(CONF_AR_TRIGGER_MIN, default=opts[CONF_AR_TRIGGER_MIN]):
                 NumberSelector(NumberSelectorConfig(min=2, max=10, step=1, mode=NumberSelectorMode.BOX)),
             vol.Optional(CONF_AR_DELAY_MIN, default=opts[CONF_AR_DELAY_MIN]):
                 NumberSelector(NumberSelectorConfig(min=0, max=10, step=1, mode=NumberSelectorMode.BOX)),
-            vol.Optional(CONF_AR_ANY_FAIL, default=opts[CONF_AR_ANY_FAIL]): bool,
-            # Dropdown with 1..10 and “Unlimited” (stored as 0):
             vol.Optional(CONF_AR_MAX_REBOOTS, default=str(opts[CONF_AR_MAX_REBOOTS])):
                 SelectSelector(SelectSelectorConfig(options=MAX_REBOOTS_OPTIONS, mode=SelectSelectorMode.DROPDOWN)),
+            vol.Optional(CONF_AR_ANY_FAIL, default=("any" if bool(opts[CONF_AR_ANY_FAIL]) else "all")):
+                SelectSelector(SelectSelectorConfig(options=ANY_FAIL_OPTIONS, mode=SelectSelectorMode.DROPDOWN)),
 
             # Five separate target inputs
             vol.Optional(CONF_AR_TARGET_1, default=opts[CONF_AR_TARGET_1]):
