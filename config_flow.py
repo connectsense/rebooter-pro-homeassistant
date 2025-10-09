@@ -59,7 +59,6 @@ class RebooterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         data = {
             CONF_HOST: host,
-            "ip_addresses": [],  # empty for manual setup
         }
         return self.async_create_entry(title=f"Rebooter Pro ({host})", data=data)
 
@@ -97,7 +96,6 @@ class RebooterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured(
             updates={
                 CONF_HOST: host,
-                "ip_addresses": [str(ip) for ip in ips],
             }
         )
 
@@ -105,7 +103,6 @@ class RebooterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             title=f"Rebooter Pro {serial}",
             data={
                 CONF_HOST: host,
-                "ip_addresses": [str(ip) for ip in ips],
             },
         )
 

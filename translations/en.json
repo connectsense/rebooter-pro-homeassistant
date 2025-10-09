@@ -56,5 +56,12 @@
         }
       }
     }
+  },
+  "device_automation": {
+    "trigger_type": {
+      "reboot_started_any": "Reboot started",
+      "reboot_started_power_fail": "Reboot started — after power failure",
+      "reboot_started_ping_fail": "Reboot started — after Internet/Ping failure"
+    }
   }
 }

@@ -19,13 +19,16 @@ from .ssl_utils import get_aiohttp_ssl
 import secrets
 from datetime import timedelta
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers import device_registry as dr
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.components import webhook
-from homeassistant.const import CONF_HOST
+from homeassistant.const import CONF_HOST, CONF_TYPE, CONF_DEVICE_ID
 from homeassistant.util import dt as dt_util
+from .device_trigger import REBOOT_EVENT
+
 
 from .const import (
     DOMAIN,
@@ -75,7 +78,6 @@ _SCHEME_RE = re.compile(r"^\s*https?://", re.IGNORECASE)
 PLATFORMS = ["switch", "button", "binary_sensor"]
 
 _LOGGER = logging.getLogger(__name__)
-
 
 async def _get_device_config(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any] | None:
     """GET https://<host>:443/config (return dict or None on error)."""
@@ -190,14 +192,6 @@ async def _ensure_tokens(hass: HomeAssistant, entry: ConfigEntry) -> None:
             },
         )
 
-def _get_allowed_ips_for_entry(hass: HomeAssistant, entry: ConfigEntry) -> set[str]:
-    """Return a set of allowed source IPs for this entry (may be empty)."""
-    # Prefer what config_flow saved, else an empty set (means: no enforcement)
-    ips = entry.data.get("ip_addresses") or entry.data.get("ip_addrs") or []
-    # Normalize strings only
-    return {str(ip) for ip in ips if isinstance(ip, (str, bytes))}
-
-
 def _serial_from_entry_and_data(entry: ConfigEntry, data: dict[str, Any]) -> str:
     """Prefer the config-entry unique_id (digits), else parse trailing digits from payload 'device'."""
     uid = (entry.unique_id or "").strip()
@@ -249,16 +243,7 @@ async def _register_webhook(hass: HomeAssistant, entry: ConfigEntry) -> tuple[st
         if not entry_id:
             return web.Response(status=404, text="Unknown webhook")
 
-
-        # Enforce IP allowlist if we have entries on file
         entry = hass.config_entries.async_get_entry(entry_id)
-        allowed = _get_allowed_ips_for_entry(hass, entry) if entry else set()
-        if allowed:
-            src_ip = request.remote or ""
-            if src_ip not in allowed:
-                _LOGGER.warning("Webhook IP %s not in allowlist for %s", src_ip, entry_id)
-                return web.Response(status=403, text="Forbidden")
-
         # Authorization header check (rotating token with grace)
         actual = request.headers.get("Authorization", "")
         cur_tok = entry.data.get(CONF_WEBHOOK_TOKEN_CURRENT) if entry else None
@@ -355,6 +340,42 @@ async def _register_webhook(hass: HomeAssistant, entry: ConfigEntry) -> tuple[st
 
         if code == CODE_REBOOTING:
             payload["rebooting"] = True  # leave outlet_active unchanged
+
+            #Attempt to send reboot event signal as trigger for automations
+            src = (data.get("source") or "").lower()
+            if "power" in src:
+                trig_type = "reboot_started_power_fail"
+            elif "ping" in src:
+                trig_type = "reboot_started_ping_fail"
+            else:
+                trig_type = "reboot_started_any"
+        
+            dev_reg = dr.async_get(hass)
+            uid = (entry.unique_id or entry.data.get("host"))
+            device = dev_reg.async_get_device(identifiers={(DOMAIN, uid)})
+            device_id = device.id if device else None
+            
+            
+            if device_id:
+                #fire specific type of reboot event first
+                hass.bus.async_fire(
+                    REBOOT_EVENT,
+                    {
+                        CONF_DEVICE_ID: device_id,
+                        CONF_TYPE: trig_type,
+                    },
+                )
+                # Also fire the generic "any" event when applicable
+                if trig_type != "reboot_started_any":
+                    hass.bus.async_fire(
+                        REBOOT_EVENT,
+                        {
+                            CONF_DEVICE_ID: device_id,
+                            CONF_TYPE: "reboot_started_any",
+                        },
+                    )
+                
+
 
         # Always pass through last_event for attributes
         payload["last_event"] = {
@@ -507,8 +528,20 @@ async def _push_webhook_to_device(hass: HomeAssistant, entry: ConfigEntry, wh_ur
         _LOGGER.debug("Device responded %s: %s", r.status, body[:500])
         r.raise_for_status()
 
-
 async def _options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    store = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+    prev_options: dict = store.get("entry_options_snapshot", {}) or {}
+
+    new_options = dict(entry.options or {})
+    changed_options_keys = {
+        k for k in set(prev_options) | set(new_options)
+        if prev_options.get(k) != new_options.get(k)
+    }
+
+    # No option changes -> nothing to push
+    if not changed_options_keys:
+        return
+    
     try:
         await _push_auto_reboot_to_device(hass, entry)
         # Reflect new options in the in-memory state used by the device overview
@@ -525,6 +558,9 @@ async def _options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
         _LOGGER.info("Re-sent auto-reboot config for %s", entry.data.get(CONF_HOST))
     except Exception as exc:
         _LOGGER.warning("Failed to re-register / push config: %s", exc)
+    finally:
+        # keep the *options* snapshot current no matter what
+        store["entry_options_snapshot"] = new_options
 
 
 # ---------- HA entry points ----------
@@ -537,9 +573,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Ensure a current token exists (prev/grace managed elsewhere)
     await _ensure_tokens(hass, entry)
-
-    # Cache an IP allowlist for this entry if we discovered any
-    store["allow_ips"] = _get_allowed_ips_for_entry(hass, entry)
 
     # Seed “overview” status flags from options (device overview wants to show these)
     opts = entry.options or {}
@@ -580,6 +613,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Re-register with device whenever options change
     entry.async_on_unload(entry.add_update_listener(_options_updated))
+    
+    store["entry_options_snapshot"] = dict(entry.options)
 
     # --- Periodic token rotation every ROTATE_INTERVAL ---
     async def _tick(_now):
