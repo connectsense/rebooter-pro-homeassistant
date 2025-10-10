@@ -75,7 +75,7 @@ from .const import (
 _SCHEME_RE = re.compile(r"^\s*https?://", re.IGNORECASE)
 
 # Add more platforms as you implement them (sensor/update/etc.)
-PLATFORMS = ["switch", "button", "binary_sensor"]
+PLATFORMS = ["switch", "button"]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -530,6 +530,22 @@ async def _push_webhook_to_device(hass: HomeAssistant, entry: ConfigEntry, wh_ur
 
 async def _options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
     store = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+    if store.pop("skip_push_once", False):
+        # Only reflect state & notify UI; we've already pushed the exact field.
+        state = store.setdefault("state", {})
+        opts = entry.options or {}
+        state["pf_enabled"] = bool(opts.get(CONF_AR_POWER_FAIL, DEFAULT_AR_POWER_FAIL))
+        state["ping_enabled"] = bool(opts.get(CONF_AR_PING_FAIL, DEFAULT_AR_PING_FAIL))
+        async_dispatcher_send(
+            hass,
+            f"{SIGNAL_UPDATE}_{entry.entry_id}",
+            {"pf_enabled": state["pf_enabled"], "ping_enabled": state["ping_enabled"]},
+        )
+        # Also update the snapshot so the next _options_updated diff sees no changes.
+        store["entry_options_snapshot"] = dict(entry.options)
+        _LOGGER.debug("Skipped full config push (handled by switch).")
+        return
+    
     prev_options: dict = store.get("entry_options_snapshot", {}) or {}
 
     new_options = dict(entry.options or {})

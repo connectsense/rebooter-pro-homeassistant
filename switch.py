@@ -6,25 +6,41 @@ import ssl
 import aiohttp
 
 from datetime import timedelta
+from typing import Any
+
 
 from homeassistant.util import dt as dt_util
 from homeassistant.auth.models import User
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.components.switch import SwitchEntity
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect, async_dispatcher_send
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.const import CONF_HOST
 
-from .const import DOMAIN, SIGNAL_UPDATE
+from .const import (
+    DOMAIN,
+    SIGNAL_UPDATE,
+    CONF_AR_POWER_FAIL,
+    CONF_AR_PING_FAIL,
+    DEFAULT_AR_POWER_FAIL,
+    DEFAULT_AR_PING_FAIL,
+)
 from .ssl_utils import get_aiohttp_ssl
 
 _LOGGER = logging.getLogger(__name__)
 MUTE_SECONDS = 8
 
 async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
-    async_add_entities([RebooterOutletSwitch(hass, entry)])
+    """Set up all Rebooter Pro switches from a config entry."""
+    entities: list[SwitchEntity] = [
+        RebooterOutletSwitch(hass, entry),
+        RebooterPowerFailSwitch(hass, entry),
+        RebooterPingFailSwitch(hass, entry),
+    ]
+    async_add_entities(entities)
 
 
 class RebooterOutletSwitch(SwitchEntity):
@@ -163,13 +179,13 @@ class RebooterOutletSwitch(SwitchEntity):
 
         _LOGGER.debug("POST /control -> %s", body)
         try:
+            store = self.hass.data[DOMAIN].setdefault(self.entry.entry_id, {})
             # store the last actor for incoming notification
             actor = await self._resolve_actor_name()
             if actor:
-                self.hass.data[DOMAIN][self.entry.entry_id]["last_actor"] = actor
+                store["last_actor"] = actor
             
             # Start/extend the mute window so codes 1/2 webhooks are ignored briefly
-            store = self.hass.data[DOMAIN].setdefault(self.entry.entry_id, {})
             store["mute_until"] = dt_util.utcnow() + timedelta(seconds=MUTE_SECONDS)    
                     
             async with session.post(
@@ -242,3 +258,138 @@ class RebooterOutletSwitch(SwitchEntity):
         
         # One-shot reconciliation after the mute window
         await self._fetch_initial_state()
+        
+
+# ------------------- Config flags (power-fail / ping-fail) --------------------
+class _RebooterConfigFlagSwitch(SwitchEntity):
+    """Base class for config flag toggles that POST partial /config and update options."""
+
+    _attr_should_poll = False
+    _attr_entity_category = EntityCategory.CONFIG
+
+
+    # to override in subclasses:
+    _flag_key_store: str = ""       # key in hass.data[DOMAIN][entry_id]["state"]
+    _option_key: str = ""           # key in entry.options
+    _device_field: str = ""         # field name posted to /config
+
+    def __init__(self, hass: HomeAssistant, entry):
+        self.hass = hass
+        self.entry = entry
+        base_uid = entry.unique_id or entry.entry_id
+        self._attr_unique_id = f"{base_uid}_{self._flag_key_store}"
+        # seed from in-memory state first; fall back to options/defaults if missing
+        state_bucket = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {}).setdefault("state", {})
+        if self._flag_key_store in state_bucket:
+            self._is_on = bool(state_bucket[self._flag_key_store])
+        else:
+            opts = entry.options or {}
+            default_val = (
+                DEFAULT_AR_POWER_FAIL if self._option_key == CONF_AR_POWER_FAIL
+                else DEFAULT_AR_PING_FAIL
+            )
+            self._is_on = bool(opts.get(self._option_key, default_val))
+        self._unsub = None
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        host = self.entry.data[CONF_HOST]
+        uid = self.entry.unique_id or host
+        return DeviceInfo(
+            identifiers={(DOMAIN, uid)},
+            name=self.entry.title or f"Rebooter Pro {uid}",
+            manufacturer="Grid Connect",
+            model="Rebooter Pro",
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        return self._is_on
+
+    async def async_added_to_hass(self) -> None:
+        @callback
+        def _handle_update(payload: dict) -> None:
+            if self._flag_key_store in payload:
+                new_val = bool(payload[self._flag_key_store])
+                if new_val != self._is_on:
+                    self._is_on = new_val
+                    self.schedule_update_ha_state()
+
+        self._unsub = async_dispatcher_connect(
+            self.hass,
+            f"{SIGNAL_UPDATE}_{self.entry.entry_id}",
+            _handle_update,
+        )
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._unsub:
+            self._unsub()
+            self._unsub = None
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self._set_flag(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self._set_flag(False)
+
+    async def _set_flag(self, desired: bool) -> None:
+        """POST partial /config and update options to reflect the new flag."""
+        prev = self._is_on
+        self._is_on = desired
+        self.async_write_ha_state()
+
+        host = self.entry.data[CONF_HOST]
+        base = f"https://{host}:443"
+        ssl_ctx = await get_aiohttp_ssl(self.hass, self.entry)
+        session = async_get_clientsession(self.hass)
+
+        payload = {self._device_field: desired}
+        _LOGGER.debug("POST /config partial -> %s", payload)
+
+        try:
+            async with session.post(
+                f"{base}/config", json=payload, ssl=ssl_ctx, timeout=8
+            ) as r:
+                text = await r.text()
+                if r.status >= 400:
+                    raise HomeAssistantError(
+                        f"Device rejected config ({r.status}): {text[:200]}"
+                    )
+                _LOGGER.debug("Partial config applied %s: %s", r.status, text[:300])
+
+            # Update HA options to match (this will trigger your options listener)
+            new_opts = dict(self.entry.options or {})
+            new_opts[self._option_key] = desired
+            self.hass.config_entries.async_update_entry(self.entry, options=new_opts)
+
+            # Update in-memory state immediately and notify listeners
+            store = self.hass.data.setdefault(DOMAIN, {}).setdefault(self.entry.entry_id, {})
+            state = store.setdefault("state", {})
+            state[self._flag_key_store] = desired
+            async_dispatcher_send(
+                self.hass,
+                f"{SIGNAL_UPDATE}_{self.entry.entry_id}",
+                {self._flag_key_store: desired},
+            )
+
+        except Exception as e:
+            # Revert UI on any error
+            self._is_on = prev
+            self.async_write_ha_state()
+            raise
+
+# Power-fail auto-reboot toggle
+class RebooterPowerFailSwitch(_RebooterConfigFlagSwitch):
+    _attr_name = "Auto-Reboot after Power Outage"
+    _flag_key_store = "pf_enabled"
+    _option_key = CONF_AR_POWER_FAIL
+    _device_field = "enable_power_fail_reboot"
+
+
+# Ping-fail auto-reboot toggle
+class RebooterPingFailSwitch(_RebooterConfigFlagSwitch):
+    _attr_name = "Intelligent Reboot (Internet/Ping)"
+    _flag_key_store = "ping_enabled"
+    _option_key = CONF_AR_PING_FAIL
+    _device_field = "enable_ping_fail_reboot"
+        

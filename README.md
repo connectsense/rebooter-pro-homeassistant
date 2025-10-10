@@ -8,7 +8,7 @@
 * The base directory the "File editor" will be the "/config" directory on the hub, but will show up as "homeassistant/".
 * If there is not yet a folder named "custom_components" create one.
 * Within "custom_components" creare a folder named "rebooter_pro"
-* In "rebooter_pro" coppy all contents of this repository EXCEPT this README.md file. This includes all subdirectories, which you will have to create manually
+* In "rebooter_pro" copy all contents of this repository EXCEPT this README.md file. This includes all subdirectories, which you will have to create manually
 * Restart the Home Assistant hub File editor → Settings Gear on Top Right → Restart Home Assistant
 
 **To enable logging in Home Assistant for the Rebooter Pro integration, do the following:**
