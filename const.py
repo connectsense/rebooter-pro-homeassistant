@@ -1,9 +1,9 @@
 from datetime import timedelta
 
-DOMAIN = "rebooter_pro"
+DOMAIN = "connectsense"
 
 # Dispatcher signal base; we suffix with entry_id so multiple devices don't cross-talk
-SIGNAL_UPDATE = "rebooter_pro_update"
+SIGNAL_UPDATE = "connectsense_update"
 
 # ---- Options (user notifications) ----
 CONF_NOTIFY_ENABLED = "notify_enabled"          # bool
