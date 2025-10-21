@@ -160,6 +160,69 @@ def _build_device_config_payload(entry: ConfigEntry) -> dict:
 
     return payload
 
+DEVICE_PREFIX = "CS-RBTR-"
+_SERIAL_RE = re.compile(r"^(\d+)$")
+async def _probe_serial_over_https(hass, entry_or_host) -> str | None:
+    """Return the numeric serial from GET /info (device), or None on failure.
+
+    Accepts either a ConfigEntry or a host string for convenience.
+    """
+    # Normalize inputs
+    if isinstance(entry_or_host, str):
+        entry = None
+        host = (entry_or_host or "").strip()
+    else:
+        entry = entry_or_host
+        host = (entry.data.get(CONF_HOST) or "").strip() if entry else ""
+
+    if not host:
+        return None
+
+    base = f"https://{host}:443"
+    session = async_get_clientsession(hass)
+
+    # SSL context selection:
+    # - If we have a ConfigEntry, use your existing helper (unchanged).
+    # - If we only have a host string:
+    #     * IP -> disable verification (False)
+    #     * hostname -> use your existing helper
+    if entry is not None:
+        ssl_ctx = await get_aiohttp_ssl(hass, entry)
+    else:
+        try:
+            ipaddress.ip_address(host)
+            ssl_ctx = False  # IP: skip hostname verification
+        except ValueError:
+            ssl_ctx = False
+
+    try:
+        async with session.get(f"{base}/info", ssl=ssl_ctx, timeout=8) as r:
+            if r.status != 200:
+                _LOGGER.debug("GET /info on %s returned %s", host, r.status)
+                return None
+            data = await r.json(content_type=None)
+    except Exception as exc:
+        _LOGGER.debug("GET /info failed for %s: %r", host, exc)
+        return None
+
+    device_field = (data or {}).get("device")
+    if not isinstance(device_field, str):
+        return None
+
+    # Strip the leading "CS-RBTR-" if present
+    if device_field.startswith(DEVICE_PREFIX):
+        candidate = device_field[len(DEVICE_PREFIX):]
+    else:
+        candidate = device_field
+
+    candidate = candidate.strip()
+    # Prefer returning a pure numeric serial; otherwise fall back to the cleaned string
+    if _SERIAL_RE.match(candidate):
+        return candidate
+
+    _LOGGER.debug("Unexpected device format in /info: %r", device_field)
+    return candidate or None
+
 async def _push_auto_reboot_to_device(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """POST the automatic reboot configuration to https://<host>:443/config."""
     host = entry.data[CONF_HOST]
@@ -582,6 +645,21 @@ async def _options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
 # ---------- HA entry points ----------
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+        # --- Normalize unique_id: migrate from host/ip -> device serial via /info ---
+    try:
+        host = entry.data.get(CONF_HOST)
+        if entry.unique_id and host and entry.unique_id == host:
+            serial = await _probe_serial_over_https(hass, entry)
+            if serial and serial != entry.unique_id:
+                hass.config_entries.async_update_entry(
+                    entry,
+                    unique_id=serial,
+                    title=f"Rebooter Pro {serial}",
+                )
+    except Exception as exc:
+        _LOGGER.debug("Unique_id migration via /info skipped: %s", exc)
+    
+    
     """Set up the Rebooter Pro integration from a config entry."""
     # Per-entry state bucket
     store = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
