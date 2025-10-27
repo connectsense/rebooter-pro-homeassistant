@@ -6,7 +6,7 @@ import asyncio
 from .ssl_utils import get_aiohttp_ssl
 
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.components.button import ButtonEntity
+from homeassistant.components.button import ButtonEntity, ButtonDeviceClass
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.const import CONF_HOST
@@ -38,6 +38,7 @@ class RebooterRebootButton(ButtonEntity):
     _attr_name = "Reboot Now"
     _attr_icon = "mdi:restart"
     _attr_should_poll = False
+    _attr_device_class = ButtonDeviceClass.RESTART
 
     def __init__(self, hass, entry):
         self.hass = hass

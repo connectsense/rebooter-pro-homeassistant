@@ -12,7 +12,7 @@ from typing import Any
 from homeassistant.util import dt as dt_util
 from homeassistant.auth.models import User
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.components.switch import SwitchEntity
+from homeassistant.components.switch import SwitchEntity, SwitchDeviceClass
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect, async_dispatcher_send
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -47,6 +47,7 @@ class RebooterOutletSwitch(SwitchEntity):
     _attr_has_entity_name = True
     _attr_name = "Toggle Power"
     _attr_should_poll = False
+    _attr_device_class = SwitchDeviceClass.OUTLET
 
     def __init__(self, hass: HomeAssistant, entry):
         self.hass = hass
