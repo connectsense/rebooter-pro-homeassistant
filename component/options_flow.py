@@ -69,7 +69,7 @@ DEFAULTS_AR = {
  }
 
 DEFAULTS_NOTIFY = {
-    CONF_NOTIFY_ENABLED: True,            # enabled by default; uses notify.notify
+    CONF_NOTIFY_ENABLED: False,            # disabled by default
     CONF_NOTIFY_SERVICE: "notify.notify",
     CONF_NOTIFY_CODE_OFF: True,
     CONF_NOTIFY_CODE_ON: True,
