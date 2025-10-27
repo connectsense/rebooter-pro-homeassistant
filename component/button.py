@@ -34,6 +34,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
 
 class RebooterRebootButton(ButtonEntity):
+    _attr_has_entity_name = True
     _attr_name = "Reboot Now"
     _attr_icon = "mdi:restart"
     _attr_should_poll = False
