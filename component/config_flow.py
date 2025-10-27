@@ -214,13 +214,22 @@ class RebooterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         except Exception as e:
             _LOGGER.debug("Serial probe failed for %s: %r", preferred_host, e)
             serial = None
+            
+        # If the probe failed (unreachable or invalid /info), do NOT add the entry.
+        if not serial:
+            _LOGGER.debug("Host '%s' unreachable or /info invalid; not creating entry.", preferred_host)
+            return self.async_show_form(
+                step_id="user",
+                data_schema=USER_SCHEMA,
+                errors={"base": "cannot_connect"},
+            )
     
-        _LOGGER.debug("Integration using unique id '%s'", serial or preferred_host)
-        await self.async_set_unique_id(serial or preferred_host, raise_on_progress=False)
+        _LOGGER.debug("Integration using unique id '%s'", serial)
+        await self.async_set_unique_id(str(serial), raise_on_progress=False)
         self._abort_if_unique_id_configured(updates={CONF_HOST: preferred_host})
         
-        # Use a serial-based title if we have it (matches Zeroconf), else fall back to host
-        title = f"Rebooter Pro {serial}" if serial else f"Rebooter Pro ({preferred_host})"
+        # Use a serial-based title
+        title = f"Rebooter Pro {serial}"
         return self.async_create_entry(
             title=title,
             data={CONF_HOST: preferred_host},
