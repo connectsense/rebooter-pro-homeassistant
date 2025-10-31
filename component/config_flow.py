@@ -177,6 +177,7 @@ class RebooterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
     def __init__(self) -> None:
         self._discovered: dict[str, str] | None = None
+        self._zc: dict[str, str] = {}  # holds zeroconf details for confirm step
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         if user_input is None:
@@ -225,6 +226,12 @@ class RebooterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
     
         _LOGGER.debug("Integration using unique id '%s'", serial)
+
+        self.context["title_placeholders"] = {
+            "serial": str(serial),
+            "host": preferred_host,
+        }
+        
         await self.async_set_unique_id(str(serial), raise_on_progress=False)
         self._abort_if_unique_id_configured(updates={CONF_HOST: preferred_host})
         
@@ -284,32 +291,34 @@ class RebooterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # If it already exists, update host and abort (normal dedupe behavior)
         self._abort_if_unique_id_configured(updates={CONF_HOST: host})
 
-        # Keep discovery pending so HA shows a "Discovered" card with Ignore/Configure
-        self._discovered = {"host": host, "serial": str(serial)}
-        return self.async_show_form(
-            step_id="confirm",
-            data_schema=vol.Schema({}),  # no fields; just a confirm step
-            description_placeholders={
-                "serial": str(serial),
-                "host": host,
-            },
-        )
+        # Stash details for the dedicated confirm step
+        self._zc = {"host": host, "serial": str(serial), "model": "Rebooter Pro"}
+        self.context.update({
+            "title_placeholders": {
+                "serial": self._zc["serial"],
+                "model": self._zc["model"],
+            }
+        })
+        return await self.async_step_zeroconf_confirm()
 
-    async def async_step_confirm(self, user_input=None):
-        """User clicked Configure on the discovery card."""
-        if not self._discovered:
-            # Safety fallback: restart zeroconf step if somehow missing
+    async def async_step_zeroconf_confirm(self, user_input: dict[str, Any] | None = None):
+        """Handle the user clicking Configure on the discovery tile."""
+        if not self._zc:
             return self.async_abort(reason="unknown")
+        host = self._zc["host"]
+        serial = self._zc["serial"]
 
-        host = self._discovered["host"]
-        serial = self._discovered["serial"]
+        if user_input is not None:
+            title = f"{self._zc['model']} {serial}"
+            return self.async_create_entry(title=title, data={CONF_HOST: host, **user_input})
 
-        # Re-check dedupe in case it was added while waiting
-        self._abort_if_unique_id_configured(updates={CONF_HOST: host})
-
-        return self.async_create_entry(
-            title=f"Rebooter Pro {serial}",
-            data={CONF_HOST: host},
+        return self.async_show_form(
+            step_id="zeroconf_confirm",
+            data_schema=vol.Schema({}),
+            description_placeholders={
+                "serial": serial,
+                "model": self._zc["model"],
+            },
         )
 
     @staticmethod
