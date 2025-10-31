@@ -86,8 +86,13 @@ ANY_FAIL_OPTIONS = [
 ]
 
 def _norm_target(s: str | None) -> str:
+    """Normalize a target, optionally preserving clears as empty string."""
+    if not s:
+        return ""
     s = (s or "").strip()
-    return _SCHEME_RE.sub("", s, count=1) if s else ""
+    if not s:
+        return ""
+    return _SCHEME_RE.sub("", s, count=1)
 
 class RebooterOptionsFlowHandler(config_entries.OptionsFlowWithConfigEntry):
     """Options for user notifications."""
@@ -144,8 +149,9 @@ class RebooterOptionsFlowHandler(config_entries.OptionsFlowWithConfigEntry):
             return self.async_create_entry(title="", data=user_input)
 
 
-        # Prefill defaults
+        # Prefill defaults; then layer in device state / saved options
         opts = {**DEFAULTS_AR, **DEFAULTS_NOTIFY, **self.config_entry.options}
+        brand_new = not bool(self.config_entry.options)  # only use "five sites" defaults on first install
         
         #try from device first
         device_cfg = await self._fetch_device_config()
@@ -172,29 +178,30 @@ class RebooterOptionsFlowHandler(config_entries.OptionsFlowWithConfigEntry):
                 if "detection_delay" in ping:
                     opts[CONF_AR_DELAY_MIN] = int(ping.get("detection_delay", DEFAULTS_AR[CONF_AR_DELAY_MIN]))
 
-            # --- SAFE TARGETS BLOCK (device state wins if present) ---
+            # --- Targets: device state wins if present; else keep saved options (even if "") ---
             for k in (CONF_AR_TARGET_1, CONF_AR_TARGET_2, CONF_AR_TARGET_3, CONF_AR_TARGET_4, CONF_AR_TARGET_5):
-                opts[k] = ""
+                opts[k] = self.config_entry.options.get(k, "")
             targets = ping.get("target_addrs") if isinstance(ping, dict) else None
             if isinstance(targets, list):
                 for i, k in enumerate((CONF_AR_TARGET_1, CONF_AR_TARGET_2, CONF_AR_TARGET_3, CONF_AR_TARGET_4, CONF_AR_TARGET_5)):
                     if i < len(targets):
                         opts[k] = (targets[i] or "")
-            else:
+                    else:
+                        opts[k] = ""
+
+        else:
+            # No device config reachable: keep saved options as-is (incl. ""), or only seed defaults on first install
+            if brand_new:
+                _LOGGER.debug("brand new device and no pulled config, populate deafult targets")
                 defaults = ["google.com","facebook.com","wikipedia.org","amazon.com","baidu.com"]
                 for k, d in zip(
                     (CONF_AR_TARGET_1, CONF_AR_TARGET_2, CONF_AR_TARGET_3, CONF_AR_TARGET_4, CONF_AR_TARGET_5),
                     defaults,
                 ):
-                    opts[k] = self.config_entry.options.get(k) or d
-
-        else:
-            defaults = ["google.com","facebook.com","wikipedia.org","amazon.com","baidu.com"]
-            for k, d in zip(
-                (CONF_AR_TARGET_1, CONF_AR_TARGET_2, CONF_AR_TARGET_3, CONF_AR_TARGET_4, CONF_AR_TARGET_5),
-                defaults,
-            ):
-                opts[k] = self.config_entry.options.get(k) or d
+                    opts[k] = self.config_entry.options.get(k, d)
+            else:
+                for k in (CONF_AR_TARGET_1, CONF_AR_TARGET_2, CONF_AR_TARGET_3, CONF_AR_TARGET_4, CONF_AR_TARGET_5):
+                    opts[k] = self.config_entry.options.get(k, "")
 
         schema = vol.Schema({
             # ---- Automatic Reboot (Detection & Timing) ----
@@ -212,15 +219,15 @@ class RebooterOptionsFlowHandler(config_entries.OptionsFlowWithConfigEntry):
                 SelectSelector(SelectSelectorConfig(options=ANY_FAIL_OPTIONS, mode=SelectSelectorMode.DROPDOWN)),
 
             # Five separate target inputs
-            vol.Optional(CONF_AR_TARGET_1, default=opts[CONF_AR_TARGET_1]):
+            vol.Optional(CONF_AR_TARGET_1):
                 TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-            vol.Optional(CONF_AR_TARGET_2, default=opts[CONF_AR_TARGET_2]):
+            vol.Optional(CONF_AR_TARGET_2):
                 TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-            vol.Optional(CONF_AR_TARGET_3, default=opts[CONF_AR_TARGET_3]):
+            vol.Optional(CONF_AR_TARGET_3):
                 TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-            vol.Optional(CONF_AR_TARGET_4, default=opts[CONF_AR_TARGET_4]):
+            vol.Optional(CONF_AR_TARGET_4):
                 TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-            vol.Optional(CONF_AR_TARGET_5, default=opts[CONF_AR_TARGET_5]):
+            vol.Optional(CONF_AR_TARGET_5):
                 TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
 
             # ---- User push notifications (mobile/others) ----
@@ -230,6 +237,28 @@ class RebooterOptionsFlowHandler(config_entries.OptionsFlowWithConfigEntry):
             vol.Optional(CONF_NOTIFY_CODE_ON, default=opts[CONF_NOTIFY_CODE_ON]): bool,
             vol.Optional(CONF_NOTIFY_CODE_REBOOT, default=opts[CONF_NOTIFY_CODE_REBOOT]): bool,
         })
+
+        # Use suggested values instead of hard defaults.
+        suggested = {
+            CONF_AR_OFF_SECONDS: str(opts[CONF_AR_OFF_SECONDS]),
+            CONF_AR_POWER_FAIL: opts[CONF_AR_POWER_FAIL],
+            CONF_AR_PING_FAIL: opts[CONF_AR_PING_FAIL],
+            CONF_AR_TRIGGER_MIN: opts[CONF_AR_TRIGGER_MIN],
+            CONF_AR_DELAY_MIN: opts[CONF_AR_DELAY_MIN],
+            CONF_AR_MAX_REBOOTS: str(opts[CONF_AR_MAX_REBOOTS]),
+            CONF_AR_ANY_FAIL: ("any" if bool(opts[CONF_AR_ANY_FAIL]) else "all"),
+            CONF_AR_TARGET_1: opts[CONF_AR_TARGET_1],
+            CONF_AR_TARGET_2: opts[CONF_AR_TARGET_2],
+            CONF_AR_TARGET_3: opts[CONF_AR_TARGET_3],
+            CONF_AR_TARGET_4: opts[CONF_AR_TARGET_4],
+            CONF_AR_TARGET_5: opts[CONF_AR_TARGET_5],
+            CONF_NOTIFY_ENABLED: opts[CONF_NOTIFY_ENABLED],
+            CONF_NOTIFY_SERVICE: opts[CONF_NOTIFY_SERVICE],
+            CONF_NOTIFY_CODE_OFF: opts[CONF_NOTIFY_CODE_OFF],
+            CONF_NOTIFY_CODE_ON: opts[CONF_NOTIFY_CODE_ON],
+            CONF_NOTIFY_CODE_REBOOT: opts[CONF_NOTIFY_CODE_REBOOT],
+        }
+        schema = self.add_suggested_values_to_schema(schema, suggested)
 
         return self.async_show_form(step_id="init", data_schema=schema)
 
