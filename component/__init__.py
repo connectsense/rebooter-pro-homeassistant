@@ -153,9 +153,8 @@ def _build_device_config_payload(entry: ConfigEntry) -> dict:
             "any_fail_logic": any_fail,
             "outage_trigger_time": trig,
             "detection_delay": delay,
+            "target_addrs": targets,
         }
-        if targets:
-            ping_cfg["target_addrs"] = targets
         payload["ping_config"] = ping_cfg
 
     return payload
