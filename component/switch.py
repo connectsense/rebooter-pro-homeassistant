@@ -382,7 +382,7 @@ class _RebooterConfigFlagSwitch(SwitchEntity):
 
 # Power-fail auto-reboot toggle
 class RebooterPowerFailSwitch(_RebooterConfigFlagSwitch):
-    _attr_name = "Auto-Reboot after Power Outage"
+    _attr_name = "Power Outage Auto Reboot"
     _flag_key_store = "pf_enabled"
     _option_key = CONF_AR_POWER_FAIL
     _device_field = "enable_power_fail_reboot"
@@ -390,7 +390,7 @@ class RebooterPowerFailSwitch(_RebooterConfigFlagSwitch):
 
 # Ping-fail auto-reboot toggle
 class RebooterPingFailSwitch(_RebooterConfigFlagSwitch):
-    _attr_name = "Intelligent Reboot (Internet/Ping)"
+    _attr_name = "Intelligent Reboot"
     _flag_key_store = "ping_enabled"
     _option_key = CONF_AR_PING_FAIL
     _device_field = "enable_ping_fail_reboot"
