@@ -361,7 +361,7 @@ async def _register_webhook(hass: HomeAssistant, entry: ConfigEntry) -> tuple[st
         entry = hass.config_entries.async_get_entry(entry_id)
         if entry is not None:
             opts = entry.options or {}
-            notify_enabled = opts.get(CONF_NOTIFY_ENABLED, True)  # default ON
+            notify_enabled = opts.get(CONF_NOTIFY_ENABLED, False)  # default OFF
             if notify_enabled and code in (CODE_OFF, CODE_ON, CODE_REBOOTING):
                 should = (
                     (code == CODE_OFF and opts.get(CONF_NOTIFY_CODE_OFF, True)) or
